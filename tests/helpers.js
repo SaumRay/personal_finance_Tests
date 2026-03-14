@@ -45,6 +45,16 @@ export async function loginViaAPI(request, email = TEST_USER.email, password = T
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     data   : form.toString(),
   });
+
+  // Better error message for CI debugging
+  if (res.status() === 401) {
+    throw new Error(
+      `loginViaAPI failed with 401 — test user not registered in DB.\n` +
+      `Email: ${email}\n` +
+      `Make sure TEST_EMAIL and TEST_PASSWORD secrets are set correctly in GitHub.`
+    );
+  }
+
   expect(res.status()).toBe(200);
   const body = await res.json();
   expect(body.access_token).toBeTruthy();
