@@ -1,0 +1,181 @@
+name: Finance Copilot — Playwright Test Suite
+
+# ── Triggers ────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+# ── Permissions ─────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  test:
+    name: Run Playwright Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # ── Environment Variables from GitHub Secrets ──────────────────────────
+    env:
+      TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
+      TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+      TEST_REGISTER_PASSWORD: ${{ secrets.TEST_REGISTER_PASSWORD }}
+      TEST_REGISTER_NAME: Playwright Tester
+      FRONTEND_URL: http://localhost:5173
+      API_URL: http://127.0.0.1:8000
+      JWT_SECRET_KEY: ci-test-secret-key-change-in-prod
+
+    steps:
+
+      # ── 1. Checkout Code ──────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Python ───────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Install Python Dependencies ────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 4. Setup Node.js ──────────────────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # ── 5. Install Frontend Dependencies ─────────────────────────────────
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # ── 6. Install Playwright + Root Dependencies ─────────────────────────
+      - name: Install root dependencies (Playwright)
+        run: npm ci
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install chromium --with-deps
+
+      # ── 7. Create .env.test from GitHub Secrets ───────────────────────────
+      - name: Create .env.test from secrets
+        run: |
+          cat > .env.test << EOF
+          TEST_EMAIL=${{ secrets.TEST_EMAIL }}
+          TEST_PASSWORD=${{ secrets.TEST_PASSWORD }}
+          TEST_REGISTER_EMAIL=newuser_playwright_${{ github.run_id }}@gmail.com
+          TEST_REGISTER_PASSWORD=${{ secrets.TEST_REGISTER_PASSWORD }}
+          TEST_REGISTER_NAME=Playwright Tester
+          FRONTEND_URL=http://localhost:5173
+          API_URL=http://127.0.0.1:8000
+          EOF
+
+      # ── 8. Start FastAPI Backend ──────────────────────────────────────────
+      - name: Start FastAPI backend
+        run: |
+          uvicorn src.api:app --host 127.0.0.1 --port 8000 &
+          echo "Backend PID: $!"
+        env:
+          JWT_SECRET_KEY: ci-test-secret-key-change-in-prod
+
+      # ── 9. Wait for Backend to be Ready ───────────────────────────────────
+      - name: Wait for backend to be ready
+        run: |
+          echo "Waiting for backend..."
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:8000/health | grep -q "ok"; then
+              echo "✅ Backend is ready!"
+              break
+            fi
+            echo "Attempt $i/30 — backend not ready yet, waiting 2s..."
+            sleep 2
+          done
+          # Final check — fail if backend never started
+          curl -f http://127.0.0.1:8000/health || (echo "❌ Backend failed to start" && exit 1)
+
+      # ── 10. Register Test User ─────────────────────────────────────────────
+      - name: Register test user in database
+        run: |
+          curl -s -X POST http://127.0.0.1:8000/auth/register \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"email\": \"${{ secrets.TEST_EMAIL }}\",
+              \"password\": \"${{ secrets.TEST_PASSWORD }}\",
+              \"full_name\": \"CI Test User\"
+            }" || echo "User may already exist — continuing"
+
+      # ── 11. Build & Start Vite Frontend ───────────────────────────────────
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Start frontend preview server
+        working-directory: frontend
+        run: |
+          npm run preview -- --host 127.0.0.1 --port 5173 &
+          echo "Frontend PID: $!"
+
+      # ── 12. Wait for Frontend to be Ready ─────────────────────────────────
+      - name: Wait for frontend to be ready
+        run: |
+          echo "Waiting for frontend..."
+          for i in {1..20}; do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 | grep -q "200"; then
+              echo "✅ Frontend is ready!"
+              break
+            fi
+            echo "Attempt $i/20 — frontend not ready yet, waiting 2s..."
+            sleep 2
+          done
+          curl -f http://localhost:5173 || (echo "❌ Frontend failed to start" && exit 1)
+
+      # ── 13. Run All Playwright Tests ──────────────────────────────────────
+      - name: Run Playwright tests
+        run: npx playwright test --reporter=html,list
+        env:
+          CI: true
+
+      # ── 14. Upload HTML Report as Artifact ────────────────────────────────
+      - name: Upload Playwright HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 30
+
+      # ── 15. Upload Test Results (for PR annotations) ──────────────────────
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.run_id }}
+          path: test-results/
+          retention-days: 7
+
+      # ── 16. Post Test Summary to PR ───────────────────────────────────────
+      - name: Post test summary
+        if: always()
+        run: |
+          echo "## 🎭 Playwright Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌿 Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🖥️ Runner | ubuntu-latest |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌐 Browser | Chromium |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📊 Report | Download from artifacts above |" >> $GITHUB_STEP_SUMMARY
