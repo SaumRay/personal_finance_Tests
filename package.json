@@ -1,0 +1,20 @@
+{
+  "name": "personal-finance-copilot-main",
+  "version": "1.0.0",
+  "description": "An end-to-end **full-stack personal finance assistant** that helps users upload bank data, analyze spending, detect anomalies, forecast savings, chat with AI, and download professional reports.",
+  "main": "playwright.config.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "dotenv": "^17.3.1"
+  }
+}
