@@ -1,6 +1,5 @@
 name: Finance Copilot — Playwright Test Suite
 
-# Triggers
 on:
   push:
     branches: [main, develop]
@@ -8,7 +7,6 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
-# Permissions
 permissions:
   contents: read
   checks: write
@@ -22,11 +20,9 @@ jobs:
 
     steps:
 
-      # 1. Checkout
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Python Setup 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -38,7 +34,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 3. Node Setup
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
@@ -56,128 +51,109 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
 
-      # 4. Create .env.test from Secrets 
       - name: Create .env.test
+        env:
+          TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
+          TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+          TEST_REGISTER_PASSWORD: ${{ secrets.TEST_REGISTER_PASSWORD }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          cat > .env.test << EOF
-          TEST_EMAIL=${{ secrets.TEST_EMAIL }}
-          TEST_PASSWORD=${{ secrets.TEST_PASSWORD }}
-          TEST_REGISTER_EMAIL=newuser_playwright_${{ github.run_id }}@gmail.com
-          TEST_REGISTER_PASSWORD=${{ secrets.TEST_REGISTER_PASSWORD }}
-          TEST_REGISTER_NAME=Playwright Tester
-          FRONTEND_URL=http://localhost:5173
-          API_URL=http://127.0.0.1:8000
-          EOF
-          echo "✅ .env.test created"
-          # Show keys only (not values) for debugging
+          printf 'TEST_EMAIL=%s\n' "$TEST_EMAIL" > .env.test
+          printf 'TEST_PASSWORD=%s\n' "$TEST_PASSWORD" >> .env.test
+          printf 'TEST_REGISTER_EMAIL=%s\n' "newuser_playwright_${RUN_ID}@gmail.com" >> .env.test
+          printf 'TEST_REGISTER_PASSWORD=%s\n' "$TEST_REGISTER_PASSWORD" >> .env.test
+          printf 'TEST_REGISTER_NAME=%s\n' "Playwright Tester" >> .env.test
+          printf 'FRONTEND_URL=%s\n' "http://localhost:5173" >> .env.test
+          printf 'API_URL=%s\n' "http://127.0.0.1:8000" >> .env.test
+          echo "✅ .env.test created — keys:"
           cat .env.test | cut -d'=' -f1
+          LINES=$(wc -l < .env.test)
+          echo "Lines written: $LINES"
+          [ "$LINES" -ge 7 ] || (echo "❌ .env.test incomplete!" && exit 1)
 
-      # 5. Start FastAPI Backend 
       - name: Start FastAPI backend
-        run: |
-          nohup uvicorn src.api:app --host 127.0.0.1 --port 8000 > backend.log 2>&1 &
-          echo "BACKEND_PID=$!" >> $GITHUB_ENV
-          echo "Backend starting with PID $!"
+        run: nohup uvicorn src.api:app --host 127.0.0.1 --port 8000 > backend.log 2>&1 &
         env:
           JWT_SECRET_KEY: ci-test-secret-key-do-not-use-in-prod
 
-      # 6. Wait for Backend 
       - name: Wait for backend to be ready
         run: |
-          echo "Waiting for backend on port 8000..."
+          echo "Waiting for backend..."
           for i in {1..40}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/health || echo "000")
             if [ "$STATUS" = "200" ]; then
-              echo " Backend ready after $i attempts!"
+              echo "✅ Backend ready after $i attempts!"
               break
             fi
-            echo "Attempt $i/40 — got HTTP $STATUS — retrying in 2s..."
+            echo "Attempt $i/40 — HTTP $STATUS — waiting 2s..."
             sleep 2
           done
-          # Hard fail if backend never came up
           FINAL=$(curl -s http://127.0.0.1:8000/health)
-          echo "Final health check: $FINAL"
-          echo $FINAL | grep -q '"ok"' || (echo " Backend failed to start — check backend.log" && cat backend.log && exit 1)
+          echo "Health check: $FINAL"
+          echo $FINAL | grep -q '"ok"' || (echo "❌ Backend failed" && cat backend.log && exit 1)
 
-      # ── 7. Register + Verify Test User ────────────────────────────────────
       - name: Register test user
+        env:
+          TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
+          TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
         run: |
-          echo "Registering test user: ${{ secrets.TEST_EMAIL }}"
-          REG=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST http://127.0.0.1:8000/auth/register \
+          echo "Registering: $TEST_EMAIL"
+          curl -s -X POST http://127.0.0.1:8000/auth/register \
             -H "Content-Type: application/json" \
-            -d "{\"email\":\"${{ secrets.TEST_EMAIL }}\",\"password\":\"${{ secrets.TEST_PASSWORD }}\",\"full_name\":\"CI Test User\"}")
-          echo "Register response: $REG"
+            -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PASSWORD\",\"full_name\":\"CI Test User\"}"
+          echo ""
 
-      - name: Verify test user login works
+      - name: Verify test user login
+        env:
+          TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
+          TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
         run: |
-          echo "Verifying login for test user..."
-          LOGIN=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST http://127.0.0.1:8000/auth/login \
+          echo "Verifying login..."
+          RESPONSE=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
             -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "username=${{ secrets.TEST_EMAIL }}&password=${{ secrets.TEST_PASSWORD }}")
-          echo "Login response: $LOGIN"
-          # Extract HTTP status
-          HTTP_STATUS=$(echo "$LOGIN" | grep "HTTP_STATUS" | cut -d':' -f2)
-          echo "HTTP Status: $HTTP_STATUS"
-          # Fail clearly if login doesn't work
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "❌ Login failed with status $HTTP_STATUS"
-            echo "Check your TEST_EMAIL and TEST_PASSWORD secrets in GitHub"
-            exit 1
-          fi
-          echo "$LOGIN" | grep -q "access_token" || (echo "❌ No access_token in response" && exit 1)
-          echo "✅ Test user login verified successfully!"
+            -d "username=$TEST_EMAIL&password=$TEST_PASSWORD")
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q "access_token" || (echo "❌ Login failed — check TEST_EMAIL and TEST_PASSWORD secrets" && exit 1)
+          echo "✅ Login verified!"
 
-      # ── 8. Build + Start Frontend ─────────────────────────────────────────
       - name: Build frontend
         working-directory: frontend
         run: npm run build
 
       - name: Start frontend preview server
         working-directory: frontend
-        run: |
-          nohup npm run preview -- --host 127.0.0.1 --port 5173 > ../frontend.log 2>&1 &
-          echo "FRONTEND_PID=$!" >> $GITHUB_ENV
-          echo "Frontend starting with PID $!"
+        run: nohup npm run preview -- --host 127.0.0.1 --port 5173 > ../frontend.log 2>&1 &
 
-      # ── 9. Wait for Frontend ──────────────────────────────────────────────
       - name: Wait for frontend to be ready
         run: |
-          echo "Waiting for frontend on port 5173..."
+          echo "Waiting for frontend..."
           for i in {1..30}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 || echo "000")
             if [ "$STATUS" = "200" ]; then
               echo "✅ Frontend ready after $i attempts!"
               break
             fi
-            echo "Attempt $i/30 — got HTTP $STATUS — retrying in 2s..."
+            echo "Attempt $i/30 — HTTP $STATUS — waiting 2s..."
             sleep 2
           done
-          # Hard fail if frontend never came up
-          FINAL_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 || echo "000")
-          if [ "$FINAL_STATUS" != "200" ]; then
-            echo "❌ Frontend failed to start — check frontend.log"
-            cat frontend.log
-            exit 1
-          fi
+          FINAL=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 || echo "000")
+          [ "$FINAL" = "200" ] || (echo "❌ Frontend failed" && cat frontend.log && exit 1)
           echo "✅ Frontend is live!"
 
-      # ── 10. Run Playwright Tests ──────────────────────────────────────────
       - name: Run all Playwright tests
         run: npx playwright test --reporter=html,list
         env:
           CI: true
           JWT_SECRET_KEY: ci-test-secret-key-do-not-use-in-prod
 
-      # ── 11. Show Backend/Frontend Logs on Failure ─────────────────────────
       - name: Show server logs on failure
         if: failure()
         run: |
           echo "====== BACKEND LOG ======"
-          cat backend.log || echo "No backend log found"
+          cat backend.log || echo "No backend log"
           echo "====== FRONTEND LOG ======"
-          cat frontend.log || echo "No frontend log found"
+          cat frontend.log || echo "No frontend log"
 
-      # ── 12. Upload HTML Report ────────────────────────────────────────────
       - name: Upload Playwright HTML report
         uses: actions/upload-artifact@v4
         if: always()
@@ -186,7 +162,6 @@ jobs:
           path: playwright-report/
           retention-days: 30
 
-      # ── 13. Upload Test Results ───────────────────────────────────────────
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
@@ -195,11 +170,10 @@ jobs:
           path: test-results/
           retention-days: 7
 
-      # ── 14. Post Summary ──────────────────────────────────────────────────
       - name: Post test summary
         if: always()
         run: |
-          echo "## 🎭 Playwright Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "##  Playwright Test Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Details |" >> $GITHUB_STEP_SUMMARY
           echo "|------|---------|" >> $GITHUB_STEP_SUMMARY
