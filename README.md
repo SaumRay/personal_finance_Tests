@@ -560,4 +560,4 @@ date,description,debit,credit,balance,transaction_type,reference
 
 ---
 
-*Built with ❤️ — Full stack · AI powered · 130 tests · CI/CD ready*
+*Built by Saumarghya Ray — Full stack · AI powered · 130 tests · CI/CD ready*
